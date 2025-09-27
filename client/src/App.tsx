@@ -15,6 +15,7 @@ import Courses from "@/pages/Courses";
 import Discussions from "@/pages/Discussions";
 import AnonymousHub from "@/pages/AnonymousHub";
 import PinnedPosts from "@/pages/PinnedPosts";
+import Users from "@/pages/admin/Users";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 
@@ -81,6 +82,7 @@ function Router() {
               <Route path="/discussions" component={Discussions} />
               <Route path="/anonymous" component={AnonymousHub} />
               <Route path="/pinned" component={PinnedPosts} />
+              <Route path="/admin/users" component={Users} />
               {/* Fallback to 404 */}
               <Route component={NotFound} />
             </Switch>
