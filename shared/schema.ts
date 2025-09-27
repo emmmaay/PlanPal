@@ -115,7 +115,7 @@ export const userBadges = pgTable("user_badges", {
 // SCHEMAS AND TYPES FOR MAIN DATABASE
 // ========================================
 
-export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertUserSchema = createInsertSchema(users).omit({ createdAt: true, updatedAt: true });
 export const selectUserSchema = createSelectSchema(users);
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type SelectUser = typeof users.$inferSelect;
