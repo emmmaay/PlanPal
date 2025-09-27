@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Calendar, TrendingUp, Users, BookOpen } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CourseCard } from "@/components/CourseCard";
@@ -6,121 +7,81 @@ import { AssignmentCard } from "@/components/AssignmentCard";
 import { NotificationPanel } from "@/components/NotificationPanel";
 import { LeaderboardCard } from "@/components/LeaderboardCard";
 import { Badge } from "@/components/ui/badge";
+import { useAuth } from "@/lib/auth";
+import type { SelectCourse, SelectNotification } from "@shared/schema";
 
-// Mock data - todo: remove mock functionality
-const mockCourses = [
-  {
-    id: "cs101",
-    title: "Data Structures & Algorithms",
-    lecturer: "Dr. John Smith",
-    courseRep: "Alice Johnson",
-    assignmentCount: 8,
-    pendingAssignments: 2,
-    studentsCount: 45,
-    nextDeadline: "Dec 15",
-    description: "Learn fundamental data structures and algorithms essential for computer science.",
-  },
-  {
-    id: "cs102",
-    title: "Object-Oriented Programming",
-    lecturer: "Prof. Sarah Wilson",
-    courseRep: "Bob Chen",
-    assignmentCount: 6,
-    pendingAssignments: 1,
-    studentsCount: 52,
-    nextDeadline: "Dec 18",
-    description: "Master OOP concepts with Java and design patterns.",
-  },
-  {
-    id: "cs103",
-    title: "Database Systems",
-    lecturer: "Dr. Michael Brown",
-    courseRep: "Carol Davis",
-    assignmentCount: 5,
-    pendingAssignments: 0,
-    studentsCount: 38,
-    description: "Database design, SQL, and modern database technologies.",
-  },
-];
-
+// Mock assignments for now - will be replaced with per-course data
 const mockAssignments = [
   {
     id: "assignment-1",
-    title: "Binary Search Tree Implementation",
-    course: "Data Structures",
-    dueDate: "Dec 20, 2024",
-    description: "Implement a binary search tree with insert, delete, and search operations.",
+    title: "Complete Project Setup",
+    course: "Web Development",
+    dueDate: "Dec 25, 2024",
+    description: "Set up your development environment and create first project.",
     isCompleted: false,
     priority: "high" as const,
-    submissionType: "Code",
-  },
-  {
-    id: "assignment-2",
-    title: "Java GUI Application",
-    course: "OOP",
-    dueDate: "Dec 22, 2024",
-    description: "Create a desktop application using Swing with MVC pattern.",
-    isCompleted: false,
-    priority: "medium" as const,
     submissionType: "Project",
   },
 ];
 
-const mockNotifications = [
-  {
-    id: "1",
-    type: "assignment" as const,
-    title: "New Assignment Posted",
-    message: "Dr. Smith has posted a new assignment: Binary Tree Traversal",
-    timestamp: "2 hours ago",
-    isRead: false,
-    course: "Data Structures",
-  },
-  {
-    id: "2",
-    type: "deadline" as const,
-    title: "Assignment Due Soon",
-    message: "Your assignment 'Graph Algorithms' is due in 2 days",
-    timestamp: "1 day ago",
-    isRead: false,
-    course: "Algorithms",
-  },
-];
 
-const mockLeaderboard = [
-  {
-    id: "1",
-    username: "alice_coder",
-    points: 2850,
-    badges: 12,
-    rank: 1,
-    contributions: 45,
-  },
-  {
-    id: "2",
-    username: "bob_dev",
-    points: 2340,
-    badges: 8,
-    rank: 2,
-    contributions: 38,
-  },
-  {
-    id: "3",
-    username: "charlie_prog",
-    points: 2100,
-    badges: 6,
-    rank: 3,
-    contributions: 32,
-  },
-];
+
 
 export default function Dashboard() {
+  const { user } = useAuth();
   const [assignments, setAssignments] = useState(mockAssignments);
-  const [notifications, setNotifications] = useState(mockNotifications);
   
-  const totalPendingAssignments = mockCourses.reduce((total, course) => total + course.pendingAssignments, 0);
-  const totalCourses = mockCourses.length;
+  // Fetch courses
+  const { data: courses = [], isLoading: coursesLoading } = useQuery<SelectCourse[]>({
+    queryKey: ['/api/courses'],
+    enabled: !!user,
+  });
+  
+  // Fetch notifications
+  const { data: notifications = [], isLoading: notificationsLoading } = useQuery<SelectNotification[]>({
+    queryKey: ['/api/notifications'],
+    enabled: !!user,
+  });
+  
+  // Fetch pinned posts for announcements
+  const { data: pinnedPosts = [] } = useQuery({
+    queryKey: ['/api/pinned'],
+    enabled: !!user,
+  });
+  
+  // Mock leaderboard for now
+  const mockLeaderboard = [
+    {
+      id: "1",
+      username: "alice_student",
+      points: 2850,
+      badges: 12,
+      rank: 1,
+      contributions: 45,
+    },
+    {
+      id: "2",
+      username: "bob_coder",
+      points: 2340,
+      badges: 8,
+      rank: 2,
+      contributions: 38,
+    },
+    {
+      id: "3",
+      username: user?.username || 'current_user',
+      points: 2100,
+      badges: 6,
+      rank: 3,
+      contributions: 32,
+    },
+  ];
+  
+  // Calculate stats
+  const totalCourses = courses.length;
+  const totalPendingAssignments = assignments.filter(a => !a.isCompleted).length;
   const completedAssignments = assignments.filter(a => a.isCompleted).length;
+  const userRank = 3; // TODO: Calculate from leaderboard data
   
   const handleToggleAssignmentComplete = (assignmentId: string) => {
     setAssignments(prev => 
@@ -132,14 +93,17 @@ export default function Dashboard() {
     );
   };
   
-  const handleMarkNotificationAsRead = (notificationId: string) => {
-    setNotifications(prev => 
-      prev.map(notification => 
-        notification.id === notificationId 
-          ? { ...notification, isRead: true }
-          : notification
-      )
-    );
+  const handleMarkNotificationAsRead = async (notificationId: string) => {
+    try {
+      await fetch(`/api/notifications/${notificationId}/read`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      // Refresh notifications
+      // TODO: Implement optimistic updates
+    } catch (error) {
+      console.error('Failed to mark notification as read:', error);
+    }
   };
 
   return (
@@ -147,7 +111,7 @@ export default function Dashboard() {
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold" data-testid="text-dashboard-title">
-          Welcome back, Student!
+          Welcome back, {user?.username || 'Student'}!
         </h1>
         <p className="text-muted-foreground mt-2">
           Here's your overview for YCT ND1 Computer Science program.
@@ -195,7 +159,7 @@ export default function Dashboard() {
             <Users className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold" data-testid="stat-user-rank">#12</div>
+            <div className="text-2xl font-bold" data-testid="stat-user-rank">#{userRank}</div>
             <p className="text-xs text-muted-foreground">In class leaderboard</p>
           </CardContent>
         </Card>
@@ -214,9 +178,32 @@ export default function Dashboard() {
               <Badge variant="secondary">{totalCourses} enrolled</Badge>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {mockCourses.map((course) => (
-                <CourseCard key={course.id} {...course} />
-              ))}
+              {coursesLoading ? (
+                <div className="col-span-2 text-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto"></div>
+                  <p className="mt-2 text-muted-foreground">Loading courses...</p>
+                </div>
+              ) : courses.length > 0 ? (
+                courses.map((course) => (
+                  <CourseCard 
+                    key={course.id} 
+                    id={course.id}
+                    title={course.name}
+                    lecturer={course.lecturer || 'TBA'}
+                    courseRep={course.courseRep || 'TBA'}
+                    description={course.description || ''}
+                    assignmentCount={0} // TODO: Get from course-specific DB
+                    pendingAssignments={0} // TODO: Get from course-specific DB
+                    studentsCount={0} // TODO: Get from course memberships
+                    nextDeadline="TBA" // TODO: Get from course-specific DB
+                  />
+                ))
+              ) : (
+                <div className="col-span-2 text-center py-8">
+                  <BookOpen className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+                  <p className="text-muted-foreground">No courses available yet</p>
+                </div>
+              )}
             </div>
           </div>
           
@@ -243,9 +230,17 @@ export default function Dashboard() {
         {/* Right Column - Notifications & Leaderboard */}
         <div className="space-y-6">
           <NotificationPanel 
-            notifications={notifications}
+            notifications={notifications.map(n => ({
+              id: n.id,
+              type: n.type as "assignment" | "post" | "reaction" | "deadline" | "system",
+              title: n.title,
+              message: n.message,
+              timestamp: new Date(n.createdAt).toLocaleString(),
+              isRead: n.isRead,
+              course: undefined, // TODO: Add course info when we have per-course data
+            }))}
             onMarkAsRead={handleMarkNotificationAsRead}
-            onMarkAllAsRead={() => setNotifications(prev => prev.map(n => ({ ...n, isRead: true })))}
+            onMarkAllAsRead={() => {/* TODO: Mark all as read API call */}}
           />
           
           <LeaderboardCard 
