@@ -168,6 +168,35 @@ export interface IStorage {
   getCourseUserStats(courseId: string, userId: string): Promise<SelectCourseUserStats | null>;
   getCourseLeaderboard(courseId: string, limit?: number): Promise<SelectCourseUserStats[]>;
   
+  // Dashboard aggregation methods
+  getUserDashboardStats(userId: string): Promise<{
+    totalCourses: number;
+    totalAssignments: number;
+    completedAssignments: number;
+    pendingAssignments: number;
+    userRank: number;
+    userPoints: number;
+  }>;
+  getAllUserAssignments(userId: string): Promise<Array<{
+    id: string;
+    title: string;
+    course: string;
+    courseId: string;
+    dueDate: string;
+    description: string;
+    isCompleted: boolean;
+    priority: 'high' | 'medium' | 'low';
+    submissionType: string;
+  }>>;
+  getGlobalLeaderboard(): Promise<Array<{
+    id: string;
+    username: string;
+    points: number;
+    badges: number;
+    rank: number;
+    contributions: number;
+  }>>;
+  
   // User management operations
   getAllUsers(): Promise<SelectUser[]>;
   banUser(userId: string): Promise<void>;
@@ -613,6 +642,218 @@ export class SupabaseStorage implements IStorage {
         .limit(limit);
     } catch (error) {
       console.error('Get course leaderboard error:', error);
+      return [];
+    }
+  }
+
+  // Dashboard aggregation methods
+  async getUserDashboardStats(userId: string): Promise<{
+    totalCourses: number;
+    totalAssignments: number;
+    completedAssignments: number;
+    pendingAssignments: number;
+    userRank: number;
+    userPoints: number;
+  }> {
+    try {
+      // Get user's courses
+      const userCourses = await this.getCoursesForUser(userId);
+      
+      // Get assignments and completions across all courses
+      let totalAssignments = 0;
+      let completedAssignments = 0;
+      let totalPoints = 0;
+      
+      for (const course of userCourses) {
+        // Get course posts (assignments)
+        const posts = await this.getCoursePostsPublic(course.id);
+        const assignments = posts.filter(post => post.type === 'assignment');
+        totalAssignments += assignments.length;
+        
+        // Get user's assignment completions for this course
+        const userStatuses = await this.getUserAssignmentStatuses(course.id, userId);
+        const completedInCourse = userStatuses.filter(status => status.isCompleted).length;
+        completedAssignments += completedInCourse;
+        
+        // Get user stats for points
+        const userStats = await this.getCourseUserStats(course.id, userId);
+        if (userStats) {
+          totalPoints += userStats.points;
+        }
+      }
+      
+      const pendingAssignments = totalAssignments - completedAssignments;
+      
+      // Calculate global rank (simplified - should be based on global leaderboard)
+      const globalLeaderboard = await this.getGlobalLeaderboard();
+      const userRank = globalLeaderboard.findIndex(entry => entry.id === userId) + 1 || 0;
+      
+      return {
+        totalCourses: userCourses.length,
+        totalAssignments,
+        completedAssignments,
+        pendingAssignments,
+        userRank,
+        userPoints: totalPoints,
+      };
+    } catch (error) {
+      console.error('Get user dashboard stats error:', error);
+      return {
+        totalCourses: 0,
+        totalAssignments: 0,
+        completedAssignments: 0,
+        pendingAssignments: 0,
+        userRank: 0,
+        userPoints: 0,
+      };
+    }
+  }
+
+  async getAllUserAssignments(userId: string): Promise<Array<{
+    id: string;
+    title: string;
+    course: string;
+    courseId: string;
+    dueDate: string;
+    description: string;
+    isCompleted: boolean;
+    priority: 'high' | 'medium' | 'low';
+    submissionType: string;
+  }>> {
+    try {
+      const userCourses = await this.getCoursesForUser(userId);
+      const allAssignments: any[] = [];
+      
+      for (const course of userCourses) {
+        // Get course posts (assignments)
+        const posts = await this.getCoursePostsPublic(course.id);
+        const assignments = posts.filter(post => post.type === 'assignment');
+        
+        // Get user's assignment statuses for this course
+        const userStatuses = await this.getUserAssignmentStatuses(course.id, userId);
+        const statusMap = new Map(userStatuses.map(status => [status.postId, status]));
+        
+        for (const assignment of assignments) {
+          const status = statusMap.get(assignment.id);
+          const isCompleted = status?.isCompleted || false;
+          const dueDate = assignment.deadline ? new Date(assignment.deadline).toLocaleDateString() : 'No deadline';
+          
+          // Determine priority based on deadline
+          let priority: 'high' | 'medium' | 'low' = 'medium';
+          if (assignment.deadline) {
+            const deadline = new Date(assignment.deadline);
+            const now = new Date();
+            const daysUntilDue = (deadline.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+            
+            if (daysUntilDue <= 3) {
+              priority = 'high';
+            } else if (daysUntilDue <= 7) {
+              priority = 'medium';
+            } else {
+              priority = 'low';
+            }
+          }
+
+          allAssignments.push({
+            id: assignment.id,
+            title: assignment.title,
+            course: course.name,
+            courseId: course.id,
+            dueDate,
+            description: assignment.content,
+            isCompleted,
+            priority,
+            submissionType: 'Assignment',
+          });
+        }
+      }
+      
+      return allAssignments;
+    } catch (error) {
+      console.error('Get all user assignments error:', error);
+      return [];
+    }
+  }
+
+  async getGlobalLeaderboard(): Promise<Array<{
+    id: string;
+    username: string;
+    points: number;
+    badges: number;
+    rank: number;
+    contributions: number;
+  }>> {
+    try {
+      // Get all users
+      const allUsers = await this.getAllUsers();
+      const leaderboardEntries: any[] = [];
+      
+      for (const user of allUsers) {
+        let totalPoints = 0;
+        let totalContributions = 0;
+        
+        // Get user's courses and stats
+        const userCourses = await this.getCoursesForUser(user.id);
+        
+        for (const course of userCourses) {
+          const userStats = await this.getCourseUserStats(course.id, user.id);
+          if (userStats) {
+            totalPoints += userStats.points;
+            totalContributions += userStats.postsCount + userStats.commentsCount;
+          }
+        }
+        
+        const badges = Math.floor(totalPoints / 100); // 1 badge per 100 points
+        
+        leaderboardEntries.push({
+          id: user.id,
+          username: user.username,
+          points: totalPoints,
+          badges,
+          rank: 0, // Will be set after sorting
+          contributions: totalContributions,
+        });
+      }
+      
+      // Sort by points descending and assign ranks
+      leaderboardEntries.sort((a, b) => b.points - a.points);
+      leaderboardEntries.forEach((entry, index) => {
+        entry.rank = index + 1;
+      });
+      
+      return leaderboardEntries;
+    } catch (error) {
+      console.error('Get global leaderboard error:', error);
+      return [];
+    }
+  }
+
+  // Helper method to get courses for a user
+  async getCoursesForUser(userId: string): Promise<SelectCourse[]> {
+    try {
+      const memberships = await this.getCourseMemberships(userId);
+      const courses: SelectCourse[] = [];
+      
+      for (const membership of memberships) {
+        const course = await this.getCourseById(membership.courseId);
+        if (course) {
+          courses.push(course);
+        }
+      }
+      
+      return courses;
+    } catch (error) {
+      console.error('Get courses for user error:', error);
+      return [];
+    }
+  }
+
+  // Helper method to get all users (for leaderboard)
+  async getAllUsers(): Promise<SelectUser[]> {
+    try {
+      return await db.select().from(users);
+    } catch (error) {
+      console.error('Get all users error:', error);
       return [];
     }
   }

@@ -569,6 +569,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Dashboard aggregation endpoints
+  app.get("/api/dashboard/stats", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const userId = req.user!.id;
+      const stats = await storage.getUserDashboardStats(userId);
+      res.json(stats);
+    } catch (error) {
+      console.error("Get dashboard stats error:", error);
+      res.status(500).json({ error: "Failed to get dashboard stats" });
+    }
+  });
+
+  app.get("/api/dashboard/assignments", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const userId = req.user!.id;
+      const assignments = await storage.getAllUserAssignments(userId);
+      res.json(assignments);
+    } catch (error) {
+      console.error("Get user assignments error:", error);
+      res.status(500).json({ error: "Failed to get user assignments" });
+    }
+  });
+
+  // Global leaderboard endpoint
+  app.get("/api/leaderboard", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const leaderboard = await storage.getGlobalLeaderboard();
+      res.json(leaderboard);
+    } catch (error) {
+      console.error("Get leaderboard error:", error);
+      res.status(500).json({ error: "Failed to get leaderboard" });
+    }
+  });
+
+  // Assignment completion endpoints
+  app.put("/api/assignments/:postId/complete", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const { postId } = req.params;
+      const { courseId, isCompleted, submissionText } = req.body;
+      const userId = req.user!.id;
+
+      // Check if status exists, if not create it
+      let status = await storage.getAssignmentStatus(courseId, postId, userId);
+      
+      if (status) {
+        // Update existing status
+        status = await storage.updateAssignmentStatus(courseId, status.id, {
+          isCompleted,
+          submissionText,
+          completedAt: isCompleted ? new Date() : null,
+        });
+      } else {
+        // Create new status
+        status = await storage.createAssignmentStatus(courseId, {
+          id: crypto.randomUUID(),
+          postId,
+          userId,
+          isCompleted,
+          submissionText: submissionText || null,
+          submissionFiles: [],
+          completedAt: isCompleted ? new Date() : null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
+
+      res.json(status);
+    } catch (error) {
+      console.error("Update assignment completion error:", error);
+      res.status(500).json({ error: "Failed to update assignment completion" });
+    }
+  });
+
   // ========================================
   // USER MANAGEMENT ROUTES (ADMIN)
   // ========================================

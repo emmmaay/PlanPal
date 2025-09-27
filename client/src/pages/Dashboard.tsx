@@ -37,96 +37,23 @@ export default function Dashboard() {
     enabled: !!user,
   });
   
-  // Fetch all course posts (assignments) across courses
-  const { data: allCoursePosts = [] } = useQuery<SelectCoursePost[]>({
-    queryKey: ['/api/courses/posts/all'],
-    queryFn: async () => {
-      if (!courses.length) return [];
-      
-      const allPosts: SelectCoursePost[] = [];
-      for (const course of courses) {
-        try {
-          const response = await fetch(`/api/courses/${course.id}/posts`);
-          if (response.ok) {
-            const posts = await response.json();
-            allPosts.push(...posts.map((post: SelectCoursePost) => ({ ...post, courseName: course.name })));
-          }
-        } catch (error) {
-          console.error(`Failed to fetch posts for course ${course.id}:`, error);
-        }
-      }
-      return allPosts;
-    },
-    enabled: !!user && courses.length > 0,
+  // Fetch dashboard stats
+  const { data: dashboardStats } = useQuery({
+    queryKey: ['/api/dashboard/stats'],
+    enabled: !!user,
   });
 
-  // Fetch user stats across all courses for leaderboard
-  const { data: userStats = [] } = useQuery<SelectCourseUserStats[]>({
-    queryKey: ['/api/courses/stats/all'],
-    queryFn: async () => {
-      if (!courses.length) return [];
-      
-      const allStats: SelectCourseUserStats[] = [];
-      for (const course of courses) {
-        try {
-          const response = await fetch(`/api/courses/${course.id}/leaderboard`);
-          if (response.ok) {
-            const leaderboard = await response.json();
-            allStats.push(...leaderboard);
-          }
-        } catch (error) {
-          console.error(`Failed to fetch stats for course ${course.id}:`, error);
-        }
-      }
-      return allStats;
-    },
-    enabled: !!user && courses.length > 0,
+  // Fetch user assignments
+  const { data: assignments = [] } = useQuery({
+    queryKey: ['/api/dashboard/assignments'],
+    enabled: !!user,
   });
 
-  // Transform course posts into assignment format
-  const assignments = useMemo(() => {
-    return allCoursePosts
-      .filter(post => post.type === 'assignment')
-      .map(post => ({
-        id: post.id,
-        title: post.title,
-        course: (post as any).courseName || 'Unknown Course',
-        dueDate: post.deadline ? new Date(post.deadline).toLocaleDateString() : 'No deadline',
-        description: post.content,
-        isCompleted: false, // TODO: Get from assignment status
-        priority: post.deadline && new Date(post.deadline) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) ? "high" as const : "medium" as const,
-        submissionType: "Assignment",
-      }));
-  }, [allCoursePosts]);
-
-  // Create leaderboard from user stats
-  const leaderboard = useMemo(() => {
-    // Aggregate stats by user
-    const userStatsMap = new Map<string, { points: number, assignments: number, posts: number, comments: number }>();
-    
-    userStats.forEach(stat => {
-      const existing = userStatsMap.get(stat.userId) || { points: 0, assignments: 0, posts: 0, comments: 0 };
-      userStatsMap.set(stat.userId, {
-        points: existing.points + stat.points,
-        assignments: existing.assignments + stat.assignmentsCompleted,
-        posts: existing.posts + stat.postsCount,
-        comments: existing.comments + stat.commentsCount,
-      });
-    });
-
-    // Convert to leaderboard format and sort by points
-    return Array.from(userStatsMap.entries())
-      .map(([userId, stats], index) => ({
-        id: userId,
-        username: userId === user?.id ? user.username : `User ${userId.slice(0, 8)}`,
-        points: stats.points,
-        badges: Math.floor(stats.points / 100), // 1 badge per 100 points
-        rank: index + 1,
-        contributions: stats.posts + stats.comments,
-      }))
-      .sort((a, b) => b.points - a.points)
-      .map((entry, index) => ({ ...entry, rank: index + 1 }));
-  }, [userStats, user]);
+  // Fetch global leaderboard
+  const { data: leaderboard = [] } = useQuery({
+    queryKey: ['/api/leaderboard'],
+    enabled: !!user,
+  });
   
   // Mark notification as read mutation
   const markNotificationReadMutation = useMutation({
@@ -145,16 +72,40 @@ export default function Dashboard() {
     },
   });
 
-  // Calculate stats
-  const totalCourses = courses.length;
-  const totalPendingAssignments = assignments.filter(a => !a.isCompleted).length;
-  const completedAssignments = assignments.filter(a => a.isCompleted).length;
-  const userRank = leaderboard.find(entry => entry.id === user?.id)?.rank || 0;
+  // Assignment completion mutation
+  const toggleAssignmentMutation = useMutation({
+    mutationFn: async ({ assignmentId, courseId, isCompleted }: { assignmentId: string; courseId: string; isCompleted: boolean }) => {
+      const response = await fetch(`/api/assignments/${assignmentId}/complete`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ courseId, isCompleted }),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to update assignment completion');
+      }
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/dashboard/assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/dashboard/stats'] });
+    },
+  });
+
+  // Use dashboard stats or fallback to calculated values
+  const totalCourses = dashboardStats?.totalCourses || courses.length;
+  const totalPendingAssignments = dashboardStats?.pendingAssignments || assignments.filter(a => !a.isCompleted).length;
+  const completedAssignments = dashboardStats?.completedAssignments || assignments.filter(a => a.isCompleted).length;
+  const userRank = dashboardStats?.userRank || leaderboard.find(entry => entry.id === user?.id)?.rank || 0;
   
   const handleToggleAssignmentComplete = async (assignmentId: string) => {
-    // TODO: Implement assignment completion API call
-    // For now, this is handled in individual course pages
-    console.log('Assignment completion to be handled in course-specific pages');
+    const assignment = assignments.find(a => a.id === assignmentId);
+    if (!assignment) return;
+    
+    toggleAssignmentMutation.mutate({
+      assignmentId,
+      courseId: assignment.courseId,
+      isCompleted: !assignment.isCompleted,
+    });
   };
   
   const handleMarkNotificationAsRead = (notificationId: string) => {
