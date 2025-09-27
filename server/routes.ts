@@ -7,9 +7,15 @@ import {
   createCourseSchema,
   assignRoleSchema,
   updateSettingSchema,
+  createPostSchema,
+  createCommentSchema,
+  createReactionSchema,
   type CreateCourseRequest,
   type AssignRoleRequest,
-  type UpdateSettingRequest
+  type UpdateSettingRequest,
+  type CreatePostRequest,
+  type CreateCommentRequest,
+  type CreateReactionRequest
 } from "@shared/schema";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -274,6 +280,375 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Get pinned posts error:", error);
       res.status(500).json({ error: "Failed to get pinned posts" });
+    }
+  });
+
+  // Create global pinned post (top admins only)
+  app.post("/api/pinned", requireAuth, requireRole(['creator', 'top_admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+      const { title, content } = req.body;
+      
+      if (!title || !content) {
+        return res.status(400).json({ error: "Title and content are required" });
+      }
+
+      const post = await storage.createGlobalPinnedPost({
+        title,
+        content,
+        author: req.user!.id
+      });
+
+      res.status(201).json(post);
+    } catch (error) {
+      console.error("Create pinned post error:", error);
+      res.status(500).json({ error: "Failed to create pinned post" });
+    }
+  });
+
+  // Update global pinned post (top admins only)
+  app.put("/api/pinned/:id", requireAuth, requireRole(['creator', 'top_admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+      const { title, content, isPinned } = req.body;
+      
+      const post = await storage.updateGlobalPinnedPost(req.params.id, {
+        title,
+        content,
+        isPinned
+      });
+
+      res.json(post);
+    } catch (error) {
+      console.error("Update pinned post error:", error);
+      res.status(500).json({ error: "Failed to update pinned post" });
+    }
+  });
+
+  // Delete global pinned post (top admins only)
+  app.delete("/api/pinned/:id", requireAuth, requireRole(['creator', 'top_admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+      await storage.deleteGlobalPinnedPost(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete pinned post error:", error);
+      res.status(500).json({ error: "Failed to delete pinned post" });
+    }
+  });
+
+  // ========================================
+  // COURSE POSTS ROUTES
+  // ========================================
+
+  // Get course posts
+  app.get("/api/courses/:courseId/posts", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      // Check course access
+      const course = await storage.getCourseById(req.params.courseId);
+      if (!course) {
+        return res.status(404).json({ error: "Course not found" });
+      }
+
+      // Verify membership
+      if (!req.user!.isCreator) {
+        const userRoles = await storage.getUserRoles(req.user!.id);
+        const isTopAdmin = userRoles.some(role => role.roleType === 'top_admin');
+        
+        if (!isTopAdmin) {
+          const memberships = await storage.getCourseMemberships(req.user!.id);
+          const hasAccess = memberships.some(m => m.courseId === course.id && m.status === 'active');
+          
+          if (!hasAccess) {
+            return res.status(403).json({ error: "Access denied to this course" });
+          }
+        }
+      }
+
+      const posts = await storage.getCoursePosts(req.params.courseId);
+      res.json(posts);
+    } catch (error) {
+      console.error("Get course posts error:", error);
+      res.status(500).json({ error: "Failed to get course posts" });
+    }
+  });
+
+  // Create course post
+  app.post("/api/courses/:courseId/posts", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const data = createPostSchema.parse(req.body) as CreatePostRequest;
+      
+      // Check if user is course admin for this course
+      const userRoles = await storage.getUserRoles(req.user!.id);
+      const isCourseAdmin = userRoles.some(role => 
+        (role.roleType === 'course_admin' && role.scope === req.params.courseId) ||
+        role.roleType === 'creator' ||
+        role.roleType === 'top_admin'
+      );
+      
+      if (!isCourseAdmin) {
+        return res.status(403).json({ error: "Only course admins can create posts" });
+      }
+
+      const post = await storage.createCoursePost(req.params.courseId, {
+        title: data.title,
+        content: data.content,
+        type: data.type,
+        authorId: req.user!.id,
+        deadline: data.deadline ? new Date(data.deadline) : undefined,
+        mediaUrls: data.mediaUrls
+      });
+
+      if (!post) {
+        return res.status(500).json({ error: "Failed to create post in course database" });
+      }
+
+      res.status(201).json(post);
+    } catch (error) {
+      console.error("Create course post error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid input data" });
+      }
+      res.status(500).json({ error: "Failed to create course post" });
+    }
+  });
+
+  // Get single course post
+  app.get("/api/courses/:courseId/posts/:postId", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const post = await storage.getCoursePostById(req.params.courseId, req.params.postId);
+      if (!post) {
+        return res.status(404).json({ error: "Post not found" });
+      }
+      res.json(post);
+    } catch (error) {
+      console.error("Get course post error:", error);
+      res.status(500).json({ error: "Failed to get course post" });
+    }
+  });
+
+  // ========================================
+  // COURSE COMMENTS ROUTES
+  // ========================================
+
+  // Get course post comments
+  app.get("/api/courses/:courseId/posts/:postId/comments", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const comments = await storage.getCourseComments(req.params.courseId, req.params.postId);
+      res.json(comments);
+    } catch (error) {
+      console.error("Get course comments error:", error);
+      res.status(500).json({ error: "Failed to get course comments" });
+    }
+  });
+
+  // Create course comment
+  app.post("/api/courses/:courseId/comments", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const data = createCommentSchema.parse(req.body) as CreateCommentRequest;
+
+      const comment = await storage.createCourseComment(req.params.courseId, {
+        postId: data.postId,
+        authorId: req.user!.id,
+        content: data.content,
+        parentId: data.parentId
+      });
+
+      if (!comment) {
+        return res.status(500).json({ error: "Failed to create comment in course database" });
+      }
+
+      res.status(201).json(comment);
+    } catch (error) {
+      console.error("Create course comment error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid input data" });
+      }
+      res.status(500).json({ error: "Failed to create course comment" });
+    }
+  });
+
+  // ========================================
+  // COURSE REACTIONS ROUTES
+  // ========================================
+
+  // Get reactions for target (post or comment)
+  app.get("/api/courses/:courseId/reactions/:targetType/:targetId", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const reactions = await storage.getCourseReactions(req.params.courseId, req.params.targetId, req.params.targetType);
+      res.json(reactions);
+    } catch (error) {
+      console.error("Get course reactions error:", error);
+      res.status(500).json({ error: "Failed to get course reactions" });
+    }
+  });
+
+  // Create or update reaction
+  app.post("/api/courses/:courseId/reactions", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const data = createReactionSchema.parse(req.body) as CreateReactionRequest;
+
+      const reaction = await storage.createCourseReaction(req.params.courseId, {
+        targetId: data.targetId,
+        targetType: data.targetType,
+        userId: req.user!.id,
+        reactionType: data.reactionType
+      });
+
+      if (!reaction) {
+        return res.status(500).json({ error: "Failed to create reaction in course database" });
+      }
+
+      res.status(201).json(reaction);
+    } catch (error) {
+      console.error("Create course reaction error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid input data" });
+      }
+      res.status(500).json({ error: "Failed to create course reaction" });
+    }
+  });
+
+  // ========================================
+  // ASSIGNMENT STATUS ROUTES
+  // ========================================
+
+  // Get assignment status for user
+  app.get("/api/courses/:courseId/assignments/:postId/status", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const status = await storage.getAssignmentStatus(req.params.courseId, req.params.postId, req.user!.id);
+      res.json(status);
+    } catch (error) {
+      console.error("Get assignment status error:", error);
+      res.status(500).json({ error: "Failed to get assignment status" });
+    }
+  });
+
+  // Update assignment status (mark as complete)
+  app.post("/api/courses/:courseId/assignments/:postId/complete", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const { submissionNote } = req.body;
+      
+      // Check if status already exists
+      const existingStatus = await storage.getAssignmentStatus(req.params.courseId, req.params.postId, req.user!.id);
+      
+      if (existingStatus) {
+        // Update existing status
+        const updatedStatus = await storage.updateAssignmentStatus(req.params.courseId, existingStatus.id, {
+          isCompleted: true,
+          completedAt: new Date(),
+          submissionNote
+        });
+        res.json(updatedStatus);
+      } else {
+        // Create new status
+        const newStatus = await storage.createAssignmentStatus(req.params.courseId, {
+          postId: req.params.postId,
+          userId: req.user!.id,
+          isCompleted: true,
+          completedAt: new Date(),
+          submissionNote
+        });
+        res.status(201).json(newStatus);
+      }
+    } catch (error) {
+      console.error("Update assignment status error:", error);
+      res.status(500).json({ error: "Failed to update assignment status" });
+    }
+  });
+
+  // ========================================
+  // COURSE LEADERBOARD ROUTES
+  // ========================================
+
+  // Get course leaderboard
+  app.get("/api/courses/:courseId/leaderboard", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const leaderboard = await storage.getCourseLeaderboard(req.params.courseId);
+      res.json(leaderboard);
+    } catch (error) {
+      console.error("Get course leaderboard error:", error);
+      res.status(500).json({ error: "Failed to get course leaderboard" });
+    }
+  });
+
+  // ========================================
+  // USER MANAGEMENT ROUTES (ADMIN)
+  // ========================================
+
+  // Get all users (top admins only)
+  app.get("/api/admin/users", requireAuth, requireRole(['creator', 'top_admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+      const users = await storage.getAllUsers();
+      
+      // Get roles for each user
+      const usersWithRoles = await Promise.all(users.map(async (user) => {
+        const roles = await storage.getUserRoles(user.id);
+        return { ...user, roles };
+      }));
+      
+      res.json(usersWithRoles);
+    } catch (error) {
+      console.error("Get all users error:", error);
+      res.status(500).json({ error: "Failed to get users" });
+    }
+  });
+
+  // Ban user (top admins only)
+  app.post("/api/admin/users/:userId/ban", requireAuth, requireRole(['creator', 'top_admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+      const targetUser = await storage.getUserById(req.params.userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      
+      if (targetUser.isCreator) {
+        return res.status(400).json({ error: "Cannot ban the creator" });
+      }
+
+      await storage.banUser(req.params.userId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Ban user error:", error);
+      res.status(500).json({ error: "Failed to ban user" });
+    }
+  });
+
+  // Unban user (top admins only)
+  app.post("/api/admin/users/:userId/unban", requireAuth, requireRole(['creator', 'top_admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+      await storage.unbanUser(req.params.userId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Unban user error:", error);
+      res.status(500).json({ error: "Failed to unban user" });
+    }
+  });
+
+  // Add user to course
+  app.post("/api/admin/courses/:courseId/members", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const { userId, role = 'student' } = req.body;
+      
+      // Check if user is authorized to add members
+      const userRoles = await storage.getUserRoles(req.user!.id);
+      const canAddMembers = userRoles.some(r => 
+        r.roleType === 'creator' ||
+        r.roleType === 'top_admin' ||
+        (r.roleType === 'course_admin' && r.scope === req.params.courseId)
+      );
+      
+      if (!canAddMembers) {
+        return res.status(403).json({ error: "Not authorized to add course members" });
+      }
+
+      const membership = await storage.createCourseMembership({
+        userId,
+        courseId: req.params.courseId,
+        role
+      });
+
+      res.status(201).json(membership);
+    } catch (error) {
+      console.error("Add course member error:", error);
+      res.status(500).json({ error: "Failed to add course member" });
     }
   });
 

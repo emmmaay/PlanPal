@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useMemo } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Calendar, TrendingUp, Users, BookOpen } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CourseCard } from "@/components/CourseCard";
@@ -8,28 +8,16 @@ import { NotificationPanel } from "@/components/NotificationPanel";
 import { LeaderboardCard } from "@/components/LeaderboardCard";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
-import type { SelectCourse, SelectNotification } from "@shared/schema";
+import { apiRequest } from "@/lib/queryClient";
+import type { SelectCourse, SelectNotification, SelectCoursePost, SelectCourseUserStats } from "@shared/schema";
 
-// Mock assignments for now - will be replaced with per-course data
-const mockAssignments = [
-  {
-    id: "assignment-1",
-    title: "Complete Project Setup",
-    course: "Web Development",
-    dueDate: "Dec 25, 2024",
-    description: "Set up your development environment and create first project.",
-    isCompleted: false,
-    priority: "high" as const,
-    submissionType: "Project",
-  },
-];
 
 
 
 
 export default function Dashboard() {
   const { user } = useAuth();
-  const [assignments, setAssignments] = useState(mockAssignments);
+  const queryClient = useQueryClient();
   
   // Fetch courses
   const { data: courses = [], isLoading: coursesLoading } = useQuery<SelectCourse[]>({
@@ -49,61 +37,128 @@ export default function Dashboard() {
     enabled: !!user,
   });
   
-  // Mock leaderboard for now
-  const mockLeaderboard = [
-    {
-      id: "1",
-      username: "alice_student",
-      points: 2850,
-      badges: 12,
-      rank: 1,
-      contributions: 45,
+  // Fetch all course posts (assignments) across courses
+  const { data: allCoursePosts = [] } = useQuery<SelectCoursePost[]>({
+    queryKey: ['/api/courses/posts/all'],
+    queryFn: async () => {
+      if (!courses.length) return [];
+      
+      const allPosts: SelectCoursePost[] = [];
+      for (const course of courses) {
+        try {
+          const response = await fetch(`/api/courses/${course.id}/posts`);
+          if (response.ok) {
+            const posts = await response.json();
+            allPosts.push(...posts.map((post: SelectCoursePost) => ({ ...post, courseName: course.name })));
+          }
+        } catch (error) {
+          console.error(`Failed to fetch posts for course ${course.id}:`, error);
+        }
+      }
+      return allPosts;
     },
-    {
-      id: "2",
-      username: "bob_coder",
-      points: 2340,
-      badges: 8,
-      rank: 2,
-      contributions: 38,
+    enabled: !!user && courses.length > 0,
+  });
+
+  // Fetch user stats across all courses for leaderboard
+  const { data: userStats = [] } = useQuery<SelectCourseUserStats[]>({
+    queryKey: ['/api/courses/stats/all'],
+    queryFn: async () => {
+      if (!courses.length) return [];
+      
+      const allStats: SelectCourseUserStats[] = [];
+      for (const course of courses) {
+        try {
+          const response = await fetch(`/api/courses/${course.id}/leaderboard`);
+          if (response.ok) {
+            const leaderboard = await response.json();
+            allStats.push(...leaderboard);
+          }
+        } catch (error) {
+          console.error(`Failed to fetch stats for course ${course.id}:`, error);
+        }
+      }
+      return allStats;
     },
-    {
-      id: "3",
-      username: user?.username || 'current_user',
-      points: 2100,
-      badges: 6,
-      rank: 3,
-      contributions: 32,
-    },
-  ];
+    enabled: !!user && courses.length > 0,
+  });
+
+  // Transform course posts into assignment format
+  const assignments = useMemo(() => {
+    return allCoursePosts
+      .filter(post => post.type === 'assignment')
+      .map(post => ({
+        id: post.id,
+        title: post.title,
+        course: (post as any).courseName || 'Unknown Course',
+        dueDate: post.deadline ? new Date(post.deadline).toLocaleDateString() : 'No deadline',
+        description: post.content,
+        isCompleted: false, // TODO: Get from assignment status
+        priority: post.deadline && new Date(post.deadline) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) ? "high" as const : "medium" as const,
+        submissionType: "Assignment",
+      }));
+  }, [allCoursePosts]);
+
+  // Create leaderboard from user stats
+  const leaderboard = useMemo(() => {
+    // Aggregate stats by user
+    const userStatsMap = new Map<string, { points: number, assignments: number, posts: number, comments: number }>();
+    
+    userStats.forEach(stat => {
+      const existing = userStatsMap.get(stat.userId) || { points: 0, assignments: 0, posts: 0, comments: 0 };
+      userStatsMap.set(stat.userId, {
+        points: existing.points + stat.points,
+        assignments: existing.assignments + stat.assignmentsCompleted,
+        posts: existing.posts + stat.postsCount,
+        comments: existing.comments + stat.commentsCount,
+      });
+    });
+
+    // Convert to leaderboard format and sort by points
+    return Array.from(userStatsMap.entries())
+      .map(([userId, stats], index) => ({
+        id: userId,
+        username: userId === user?.id ? user.username : `User ${userId.slice(0, 8)}`,
+        points: stats.points,
+        badges: Math.floor(stats.points / 100), // 1 badge per 100 points
+        rank: index + 1,
+        contributions: stats.posts + stats.comments,
+      }))
+      .sort((a, b) => b.points - a.points)
+      .map((entry, index) => ({ ...entry, rank: index + 1 }));
+  }, [userStats, user]);
   
+  // Mark notification as read mutation
+  const markNotificationReadMutation = useMutation({
+    mutationFn: async (notificationId: string) => {
+      const response = await fetch(`/api/notifications/${notificationId}/read`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!response.ok) {
+        throw new Error('Failed to mark notification as read');
+      }
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/notifications'] });
+    },
+  });
+
   // Calculate stats
   const totalCourses = courses.length;
   const totalPendingAssignments = assignments.filter(a => !a.isCompleted).length;
   const completedAssignments = assignments.filter(a => a.isCompleted).length;
-  const userRank = 3; // TODO: Calculate from leaderboard data
+  const userRank = leaderboard.find(entry => entry.id === user?.id)?.rank || 0;
   
-  const handleToggleAssignmentComplete = (assignmentId: string) => {
-    setAssignments(prev => 
-      prev.map(assignment => 
-        assignment.id === assignmentId 
-          ? { ...assignment, isCompleted: !assignment.isCompleted }
-          : assignment
-      )
-    );
+  const handleToggleAssignmentComplete = async (assignmentId: string) => {
+    // TODO: Implement assignment completion API call
+    // For now, this is handled in individual course pages
+    console.log('Assignment completion to be handled in course-specific pages');
   };
   
-  const handleMarkNotificationAsRead = async (notificationId: string) => {
-    try {
-      await fetch(`/api/notifications/${notificationId}/read`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      // Refresh notifications
-      // TODO: Implement optimistic updates
-    } catch (error) {
-      console.error('Failed to mark notification as read:', error);
-    }
+  const handleMarkNotificationAsRead = (notificationId: string) => {
+    markNotificationReadMutation.mutate(notificationId);
   };
 
   return (
@@ -245,7 +300,7 @@ export default function Dashboard() {
           
           <LeaderboardCard 
             title="Class Leaderboard"
-            entries={mockLeaderboard}
+            entries={leaderboard.slice(0, 5)}
             maxEntries={5}
           />
         </div>

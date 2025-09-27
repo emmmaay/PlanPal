@@ -11,6 +11,11 @@ import {
   globalPinnedPosts,
   userBadges,
   platformSettings,
+  coursePosts,
+  courseComments,
+  courseReactions,
+  assignmentStatus,
+  courseUserStats,
   type InsertUser,
   type SelectUser,
   type InsertRole,
@@ -28,10 +33,20 @@ import {
   type InsertUserBadge,
   type SelectUserBadge,
   type InsertPlatformSetting,
-  type SelectPlatformSetting
+  type SelectPlatformSetting,
+  type InsertCoursePost,
+  type SelectCoursePost,
+  type InsertCourseComment,
+  type SelectCourseComment,
+  type InsertCourseReaction,
+  type SelectCourseReaction,
+  type InsertAssignmentStatus,
+  type SelectAssignmentStatus,
+  type InsertCourseUserStats,
+  type SelectCourseUserStats
 } from "@shared/schema";
 
-// Database connection
+// Main database connection
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error("DATABASE_URL environment variable is required");
@@ -39,6 +54,37 @@ if (!connectionString) {
 
 const client = postgres(connectionString);
 export const db = drizzle(client);
+
+// Course database connections cache
+const courseDbConnections = new Map<string, ReturnType<typeof drizzle>>();
+
+// Function to get course database connection using Supabase service key
+export async function getCourseDb(courseId: string): Promise<ReturnType<typeof drizzle> | null> {
+  if (courseDbConnections.has(courseId)) {
+    return courseDbConnections.get(courseId)!;
+  }
+
+  try {
+    const credentials = await storage.getCourseCredentials(courseId);
+    if (!credentials) {
+      console.error(`No credentials found for course ${courseId}`);
+      return null;
+    }
+
+    // Extract database connection details from Supabase URL
+    const dbUrl = credentials.supabaseUrl.replace('https://', '').replace('.supabase.co', '');
+    const connectionString = `postgresql://postgres:${credentials.supabaseServiceKey}@db.${dbUrl}.supabase.co:5432/postgres`;
+    
+    const courseClient = postgres(connectionString);
+    const courseDb = drizzle(courseClient);
+    
+    courseDbConnections.set(courseId, courseDb);
+    return courseDb;
+  } catch (error) {
+    console.error(`Failed to connect to course database ${courseId}:`, error);
+    return null;
+  }
+}
 
 // Storage interface for main database operations
 export interface IStorage {
@@ -92,6 +138,40 @@ export interface IStorage {
   getSetting(key: string): Promise<SelectPlatformSetting | undefined>;
   updateSetting(key: string, value: any, updatedBy: string): Promise<SelectPlatformSetting>;
   getAllSettings(): Promise<SelectPlatformSetting[]>;
+  
+  // Course-specific operations (connect to course databases)
+  // Posts operations
+  createCoursePost(courseId: string, post: InsertCoursePost): Promise<SelectCoursePost | null>;
+  getCoursePosts(courseId: string, limit?: number): Promise<SelectCoursePost[]>;
+  getCoursePostById(courseId: string, postId: string): Promise<SelectCoursePost | null>;
+  updateCoursePost(courseId: string, postId: string, updates: Partial<InsertCoursePost>): Promise<SelectCoursePost | null>;
+  deleteCoursePost(courseId: string, postId: string): Promise<void>;
+  
+  // Comments operations
+  createCourseComment(courseId: string, comment: InsertCourseComment): Promise<SelectCourseComment | null>;
+  getCourseComments(courseId: string, postId: string): Promise<SelectCourseComment[]>;
+  updateCourseComment(courseId: string, commentId: string, updates: Partial<InsertCourseComment>): Promise<SelectCourseComment | null>;
+  deleteCourseComment(courseId: string, commentId: string): Promise<void>;
+  
+  // Reactions operations
+  createCourseReaction(courseId: string, reaction: InsertCourseReaction): Promise<SelectCourseReaction | null>;
+  getCourseReactions(courseId: string, targetId: string, targetType: string): Promise<SelectCourseReaction[]>;
+  deleteCourseReaction(courseId: string, reactionId: string): Promise<void>;
+  
+  // Assignment status operations
+  createAssignmentStatus(courseId: string, status: InsertAssignmentStatus): Promise<SelectAssignmentStatus | null>;
+  getAssignmentStatus(courseId: string, postId: string, userId: string): Promise<SelectAssignmentStatus | null>;
+  updateAssignmentStatus(courseId: string, statusId: string, updates: Partial<InsertAssignmentStatus>): Promise<SelectAssignmentStatus | null>;
+  getUserAssignmentStatuses(courseId: string, userId: string): Promise<SelectAssignmentStatus[]>;
+  
+  // Course stats operations
+  getCourseUserStats(courseId: string, userId: string): Promise<SelectCourseUserStats | null>;
+  getCourseLeaderboard(courseId: string, limit?: number): Promise<SelectCourseUserStats[]>;
+  
+  // User management operations
+  getAllUsers(): Promise<SelectUser[]>;
+  banUser(userId: string): Promise<void>;
+  unbanUser(userId: string): Promise<void>;
 }
 
 // Supabase storage implementation
@@ -286,6 +366,272 @@ export class SupabaseStorage implements IStorage {
 
   async getAllSettings(): Promise<SelectPlatformSetting[]> {
     return await db.select().from(platformSettings);
+  }
+  
+  // Course-specific operations
+  async createCoursePost(courseId: string, post: InsertCoursePost): Promise<SelectCoursePost | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.insert(coursePosts).values(post).returning();
+      return result[0];
+    } catch (error) {
+      console.error('Create course post error:', error);
+      return null;
+    }
+  }
+
+  async getCoursePosts(courseId: string, limit: number = 50): Promise<SelectCoursePost[]> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return [];
+    
+    try {
+      return await courseDb.select().from(coursePosts)
+        .where(eq(coursePosts.isDeleted, false))
+        .orderBy(coursePosts.createdAt)
+        .limit(limit);
+    } catch (error) {
+      console.error('Get course posts error:', error);
+      return [];
+    }
+  }
+
+  async getCoursePostById(courseId: string, postId: string): Promise<SelectCoursePost | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.select().from(coursePosts)
+        .where(and(eq(coursePosts.id, postId), eq(coursePosts.isDeleted, false)));
+      return result[0] || null;
+    } catch (error) {
+      console.error('Get course post error:', error);
+      return null;
+    }
+  }
+
+  async updateCoursePost(courseId: string, postId: string, updates: Partial<InsertCoursePost>): Promise<SelectCoursePost | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.update(coursePosts)
+        .set({ ...updates, updatedAt: new Date() })
+        .where(eq(coursePosts.id, postId))
+        .returning();
+      return result[0] || null;
+    } catch (error) {
+      console.error('Update course post error:', error);
+      return null;
+    }
+  }
+
+  async deleteCoursePost(courseId: string, postId: string): Promise<void> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return;
+    
+    try {
+      await courseDb.update(coursePosts)
+        .set({ isDeleted: true, updatedAt: new Date() })
+        .where(eq(coursePosts.id, postId));
+    } catch (error) {
+      console.error('Delete course post error:', error);
+    }
+  }
+
+  async createCourseComment(courseId: string, comment: InsertCourseComment): Promise<SelectCourseComment | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.insert(courseComments).values(comment).returning();
+      return result[0];
+    } catch (error) {
+      console.error('Create course comment error:', error);
+      return null;
+    }
+  }
+
+  async getCourseComments(courseId: string, postId: string): Promise<SelectCourseComment[]> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return [];
+    
+    try {
+      return await courseDb.select().from(courseComments)
+        .where(and(eq(courseComments.postId, postId), eq(courseComments.isDeleted, false)))
+        .orderBy(courseComments.createdAt);
+    } catch (error) {
+      console.error('Get course comments error:', error);
+      return [];
+    }
+  }
+
+  async updateCourseComment(courseId: string, commentId: string, updates: Partial<InsertCourseComment>): Promise<SelectCourseComment | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.update(courseComments)
+        .set({ ...updates, updatedAt: new Date() })
+        .where(eq(courseComments.id, commentId))
+        .returning();
+      return result[0] || null;
+    } catch (error) {
+      console.error('Update course comment error:', error);
+      return null;
+    }
+  }
+
+  async deleteCourseComment(courseId: string, commentId: string): Promise<void> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return;
+    
+    try {
+      await courseDb.update(courseComments)
+        .set({ isDeleted: true, updatedAt: new Date() })
+        .where(eq(courseComments.id, commentId));
+    } catch (error) {
+      console.error('Delete course comment error:', error);
+    }
+  }
+
+  async createCourseReaction(courseId: string, reaction: InsertCourseReaction): Promise<SelectCourseReaction | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.insert(courseReactions).values(reaction).returning();
+      return result[0];
+    } catch (error) {
+      console.error('Create course reaction error:', error);
+      return null;
+    }
+  }
+
+  async getCourseReactions(courseId: string, targetId: string, targetType: string): Promise<SelectCourseReaction[]> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return [];
+    
+    try {
+      return await courseDb.select().from(courseReactions)
+        .where(and(eq(courseReactions.targetId, targetId), eq(courseReactions.targetType, targetType)));
+    } catch (error) {
+      console.error('Get course reactions error:', error);
+      return [];
+    }
+  }
+
+  async deleteCourseReaction(courseId: string, reactionId: string): Promise<void> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return;
+    
+    try {
+      await courseDb.delete(courseReactions).where(eq(courseReactions.id, reactionId));
+    } catch (error) {
+      console.error('Delete course reaction error:', error);
+    }
+  }
+
+  async createAssignmentStatus(courseId: string, status: InsertAssignmentStatus): Promise<SelectAssignmentStatus | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.insert(assignmentStatus).values(status).returning();
+      return result[0];
+    } catch (error) {
+      console.error('Create assignment status error:', error);
+      return null;
+    }
+  }
+
+  async getAssignmentStatus(courseId: string, postId: string, userId: string): Promise<SelectAssignmentStatus | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.select().from(assignmentStatus)
+        .where(and(eq(assignmentStatus.postId, postId), eq(assignmentStatus.userId, userId)));
+      return result[0] || null;
+    } catch (error) {
+      console.error('Get assignment status error:', error);
+      return null;
+    }
+  }
+
+  async updateAssignmentStatus(courseId: string, statusId: string, updates: Partial<InsertAssignmentStatus>): Promise<SelectAssignmentStatus | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.update(assignmentStatus)
+        .set({ ...updates, updatedAt: new Date() })
+        .where(eq(assignmentStatus.id, statusId))
+        .returning();
+      return result[0] || null;
+    } catch (error) {
+      console.error('Update assignment status error:', error);
+      return null;
+    }
+  }
+
+  async getUserAssignmentStatuses(courseId: string, userId: string): Promise<SelectAssignmentStatus[]> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return [];
+    
+    try {
+      return await courseDb.select().from(assignmentStatus)
+        .where(eq(assignmentStatus.userId, userId));
+    } catch (error) {
+      console.error('Get user assignment statuses error:', error);
+      return [];
+    }
+  }
+
+  async getCourseUserStats(courseId: string, userId: string): Promise<SelectCourseUserStats | null> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return null;
+    
+    try {
+      const result = await courseDb.select().from(courseUserStats)
+        .where(eq(courseUserStats.userId, userId));
+      return result[0] || null;
+    } catch (error) {
+      console.error('Get course user stats error:', error);
+      return null;
+    }
+  }
+
+  async getCourseLeaderboard(courseId: string, limit: number = 10): Promise<SelectCourseUserStats[]> {
+    const courseDb = await getCourseDb(courseId);
+    if (!courseDb) return [];
+    
+    try {
+      return await courseDb.select().from(courseUserStats)
+        .orderBy(courseUserStats.points)
+        .limit(limit);
+    } catch (error) {
+      console.error('Get course leaderboard error:', error);
+      return [];
+    }
+  }
+
+  // User management operations
+  async getAllUsers(): Promise<SelectUser[]> {
+    return await db.select().from(users);
+  }
+
+  async banUser(userId: string): Promise<void> {
+    await db.update(users)
+      .set({ isBanned: true, updatedAt: new Date() })
+      .where(eq(users.id, userId));
+  }
+
+  async unbanUser(userId: string): Promise<void> {
+    await db.update(users)
+      .set({ isBanned: false, updatedAt: new Date() })
+      .where(eq(users.id, userId));
   }
 }
 
