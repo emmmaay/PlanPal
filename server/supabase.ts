@@ -8,18 +8,27 @@ if (!supabaseUrl || !supabaseServiceKey) {
   console.warn('Supabase credentials not configured - authentication will not work properly');
 }
 
-export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
-  }
-});
+export const supabaseAdmin = supabaseUrl && supabaseServiceKey 
+  ? createClient(supabaseUrl, supabaseServiceKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    })
+  : null;
 
 // Client for verifying JWTs
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || '';
-export const supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
+export const supabaseClient = supabaseUrl && supabaseAnonKey 
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
 
 export async function verifySupabaseToken(token: string) {
+  if (!supabaseClient) {
+    console.warn('Supabase client not configured - cannot verify token');
+    return null;
+  }
+  
   try {
     const { data: { user }, error } = await supabaseClient.auth.getUser(token);
     if (error || !user) {
